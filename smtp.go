@@ -12,8 +12,10 @@ import (
 	"strings"
 )
 
+// ErrCRLFContain is returned when command text containing CR or LF.
 var ErrCRLFContain = errors.New("smtp: A line must not contain CR or LF")
 
+// Client represents a client connection an SMTP server.
 type Client struct {
 	remoteHost string
 	localHost  string
@@ -23,6 +25,7 @@ type Client struct {
 	auth       []string
 }
 
+// NewClient returns new Client.
 func NewClient(host string) *Client {
 	return &Client{
 		localHost:  "localhost",
@@ -115,6 +118,7 @@ func (c *Client) startTLS(config *tls.Config) error {
 	return c.hello(c.localHost)
 }
 
+// Send sends an email with the request r.
 func (c *Client) Send(r *Request) error {
 	if err := c.dial(); err != nil {
 		return err
@@ -176,6 +180,7 @@ func (c *Client) execCmd(expectCode int, fmt string, args ...interface{}) (int, 
 	return c.textConn.ReadResponse(expectCode)
 }
 
+// Request represents an mail request.
 type Request struct {
 	From      string
 	To        []string
@@ -187,6 +192,7 @@ type Request struct {
 	ctx       context.Context
 }
 
+// NewRequest returns new Request.
 func NewRequest(ctx context.Context, to []string, body io.Reader) (*Request, error) {
 	// TODO: validate `to`
 	if ctx == nil {
@@ -225,6 +231,7 @@ func (r *Request) Write(w io.Writer) error {
 	return nil
 }
 
+// Header represents the key-value pairs in an SMTP header.
 type Header map[string][]string
 
 var headerNewlineToSpace = strings.NewReplacer("\n", " ", "\r", " ")
@@ -234,26 +241,33 @@ var defaultExcludeHeaders = map[string]bool{
 	"Subject": true,
 }
 
+// Add adds the key, value pair to the header.
 func (h Header) Add(key, value string) {
 	textproto.MIMEHeader(h).Add(key, value)
 }
 
+// Del deletes the values associated with key.
 func (h Header) Del(key string) {
 	textproto.MIMEHeader(h).Del(key)
 }
 
+// Get gets the first value associated with the given key.
 func (h Header) Get(key string) string {
 	return textproto.MIMEHeader(h).Get(key)
 }
 
+// Set sets the header entries associated with key to the single element value.
 func (h Header) Set(key, value string) {
 	textproto.MIMEHeader(h).Set(key, value)
 }
 
+// Write writes a header in wire format.
 func (h Header) Write(w io.Writer) error {
 	return h.WriteSubset(w, nil)
 }
 
+// WriteSubset writes a header in wire format.
+// If exclude is not nil, keys where exclude[key] == true are not written.
 func (h Header) WriteSubset(w io.Writer, exclude map[string]bool) error {
 	h.exclude(exclude)
 	for k, vs := range h {
