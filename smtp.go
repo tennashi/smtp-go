@@ -148,6 +148,11 @@ func (c *Client) Send(r *Request) error {
 			return err
 		}
 	}
+	for _, bcc := range r.Bcc {
+		if _, _, err := c.execCmd(25, "RCPT TO:<%s>", bcc); err != nil {
+			return err
+		}
+	}
 
 	if _, _, err := c.execCmd(354, "DATA"); err != nil {
 		return err
@@ -184,6 +189,8 @@ func (c *Client) execCmd(expectCode int, fmt string, args ...interface{}) (int, 
 type Request struct {
 	From      string
 	To        []string
+	Cc        []string
+	Bcc       []string
 	Subject   string
 	Header    Header
 	Body      io.ReadCloser
@@ -216,6 +223,11 @@ func (r *Request) Write(w io.Writer) error {
 	}
 	for _, to := range r.To {
 		if err := writeHeader(w, "To", to); err != nil {
+			return err
+		}
+	}
+	for _, cc := range r.Cc {
+		if err := writeHeader(w, "Cc", cc); err != nil {
 			return err
 		}
 	}
