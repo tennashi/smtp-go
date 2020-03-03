@@ -41,7 +41,19 @@ func validateLine(line string) error {
 }
 
 func (c *Client) dial() error {
-	netConn, err := net.Dial("tcp", c.remoteHost)
+	var netConn net.Conn
+	var err error
+	mxRecords, _ := net.LookupMX(c.remoteHost)
+	for _, mx := range mxRecords {
+		netConn, err = net.Dial("tcp", mx.Host)
+		if err == nil {
+			break
+		}
+	}
+	if netConn == nil {
+		remoteHost := c.remoteHost
+		netConn, err = net.Dial("tcp", remoteHost)
+	}
 	textConn := textproto.NewConn(netConn)
 	if err != nil {
 		return err
