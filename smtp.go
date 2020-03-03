@@ -42,22 +42,31 @@ func validateLine(line string) error {
 
 func (c *Client) dial() error {
 	var netConn net.Conn
-	var err error
-	mxRecords, _ := net.LookupMX(c.remoteHost)
+	host, port, err := net.SplitHostPort(c.remoteHost)
+	if err != nil {
+		return err
+	}
+	mxRecords, err := net.LookupMX(host)
+	if err != nil {
+		return err
+	}
 	for _, mx := range mxRecords {
-		netConn, err = net.Dial("tcp", mx.Host)
+		netConn, err = net.Dial("tcp", mx.Host+":"+port)
 		if err == nil {
 			break
 		}
 	}
-	if netConn == nil {
-		remoteHost := c.remoteHost
-		netConn, err = net.Dial("tcp", remoteHost)
-	}
-	textConn := textproto.NewConn(netConn)
 	if err != nil {
 		return err
 	}
+	if netConn == nil {
+		netConn, err = net.Dial("tcp", c.remoteHost)
+		if err != nil {
+			return err
+		}
+	}
+
+	textConn := textproto.NewConn(netConn)
 	if _, _, err := textConn.ReadCodeLine(220); err != nil {
 		return err
 	}
