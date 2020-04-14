@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/textproto"
 	"strings"
+	"time"
 )
 
 // ErrCRLFContain is returned when command text containing CR or LF.
@@ -46,9 +47,37 @@ func (c *Client) dial() error {
 	if err != nil {
 		return err
 	}
-	mxRecords, err := net.LookupMX(host)
-	if err != nil {
-		return err
+	var mxRecords []*net.MX
+	var tempDelay time.Duration
+	for {
+		var err error
+		mxRecords, err = net.LookupMX(host)
+		if err == nil {
+			break
+		}
+		var de *net.DNSError
+		if !errors.As(err, &de) {
+			return err
+		}
+		if de.Temporary() {
+			if tempDelay == 0 {
+				tempDelay = 5 * time.Millisecond
+			} else {
+				tempDelay *= 2
+			}
+			if tempDelay > 1*time.Second {
+				tempDelay = 1 * time.Second
+			}
+			time.Sleep(tempDelay)
+			continue
+		}
+		if de.Timeout() {
+			return err
+		}
+		if de.IsNotFound {
+			mxRecords = []*net.MX{{Host: host}}
+			break
+		}
 	}
 	for _, mx := range mxRecords {
 		netConn, err = net.Dial("tcp", mx.Host+":"+port)
@@ -58,12 +87,6 @@ func (c *Client) dial() error {
 	}
 	if err != nil {
 		return err
-	}
-	if netConn == nil {
-		netConn, err = net.Dial("tcp", c.remoteHost)
-		if err != nil {
-			return err
-		}
 	}
 
 	textConn := textproto.NewConn(netConn)
