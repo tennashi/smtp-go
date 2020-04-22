@@ -20,8 +20,6 @@ var ErrCRLFContain = errors.New("smtp: A line must not contain CR or LF")
 type Client struct {
 	remoteHost string
 	localHost  string
-	textConn   *textproto.Conn
-	netConn    net.Conn
 	ext        map[string]string
 	auth       []string
 }
@@ -34,6 +32,28 @@ func NewClient(host string) *Client {
 	}
 }
 
+type conn struct {
+	textConn *textproto.Conn
+	netConn  net.Conn
+}
+
+func (c *conn) close() error {
+	if err := c.textConn.Close(); err != nil {
+		return err
+	}
+	return c.netConn.Close()
+}
+
+func (c *conn) execCmd(expectCode int, fmt string, args ...interface{}) (int, string, error) {
+	id, err := c.textConn.Cmd(fmt, args...)
+	if err != nil {
+		return 0, "", err
+	}
+	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id)
+	return c.textConn.ReadResponse(expectCode)
+}
+
 func validateLine(line string) error {
 	if strings.ContainsAny(line, "\r\n") {
 		return ErrCRLFContain
@@ -41,11 +61,11 @@ func validateLine(line string) error {
 	return nil
 }
 
-func (c *Client) dial() error {
+func (c *Client) dial() (*conn, error) {
 	var netConn net.Conn
 	host, port, err := net.SplitHostPort(c.remoteHost)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var mxRecords []*net.MX
 	var tempDelay time.Duration
@@ -57,7 +77,7 @@ func (c *Client) dial() error {
 		}
 		var de *net.DNSError
 		if !errors.As(err, &de) {
-			return err
+			return nil, err
 		}
 		if de.Temporary() {
 			if tempDelay == 0 {
@@ -72,7 +92,7 @@ func (c *Client) dial() error {
 			continue
 		}
 		if de.Timeout() {
-			return err
+			return nil, err
 		}
 		if de.IsNotFound {
 			mxRecords = []*net.MX{{Host: host}}
@@ -86,32 +106,26 @@ func (c *Client) dial() error {
 		}
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	textConn := textproto.NewConn(netConn)
 	if _, _, err := textConn.ReadCodeLine(220); err != nil {
-		return err
+		return nil, err
 	}
-	c.textConn = textConn
-	c.netConn = netConn
-	return nil
+	return &conn{
+		textConn: textConn,
+		netConn:  netConn,
+	}, nil
 }
 
-func (c *Client) close() error {
-	if err := c.textConn.Close(); err != nil {
-		return err
-	}
-	return c.netConn.Close()
-}
-
-func (c *Client) hello(localHost string) error {
+func (c *Client) hello(conn *conn, localHost string) error {
 	if err := validateLine(localHost); err != nil {
 		return err
 	}
-	_, msg, err := c.execCmd(250, "EHLO %s", localHost)
+	_, msg, err := conn.execCmd(250, "EHLO %s", localHost)
 	if err != nil {
-		if _, _, err := c.execCmd(250, "HELO %s", localHost); err != nil {
+		if _, _, err := conn.execCmd(250, "HELO %s", localHost); err != nil {
 			return err
 		}
 		return nil
@@ -142,34 +156,35 @@ func parseExt(ehloMsg string) map[string]string {
 	return ext
 }
 
-func (c *Client) mail(from string) error {
+func (c *Client) mail(conn *conn, from string) error {
 	cmdStr := "MAIL FROM:<%s>"
 	if c.ext != nil {
 		if _, ok := c.ext["8BITMIME"]; ok {
 			cmdStr += " BODY=8BITMIME"
 		}
 	}
-	_, _, err := c.execCmd(250, cmdStr, from)
+	_, _, err := conn.execCmd(250, cmdStr, from)
 	return err
 }
 
-func (c *Client) startTLS(config *tls.Config) error {
-	if _, _, err := c.execCmd(220, "STARTTLS"); err != nil {
+func (c *Client) startTLS(conn *conn, config *tls.Config) error {
+	if _, _, err := conn.execCmd(220, "STARTTLS"); err != nil {
 		return err
 	}
-	c.netConn = tls.Client(c.netConn, config)
-	c.textConn = textproto.NewConn(c.netConn)
-	return c.hello(c.localHost)
+	conn.netConn = tls.Client(conn.netConn, config)
+	conn.textConn = textproto.NewConn(conn.netConn)
+	return c.hello(conn, c.localHost)
 }
 
 // Send sends an email with the request r.
 func (c *Client) Send(r *Request) error {
-	if err := c.dial(); err != nil {
+	conn, err := c.dial()
+	if err != nil {
 		return err
 	}
-	defer c.close()
+	defer conn.close()
 
-	if err := c.hello(c.localHost); err != nil {
+	if err := c.hello(conn, c.localHost); err != nil {
 		return err
 	}
 
@@ -178,55 +193,45 @@ func (c *Client) Send(r *Request) error {
 		if tlsCfg == nil {
 			tlsCfg = &tls.Config{ServerName: c.remoteHost}
 		}
-		if err := c.startTLS(tlsCfg); err != nil {
+		if err := c.startTLS(conn, tlsCfg); err != nil {
 			return err
 		}
 	}
 
-	if err := c.mail(r.From); err != nil {
+	if err := c.mail(conn, r.From); err != nil {
 		return err
 	}
 
 	for _, to := range r.To {
-		if _, _, err := c.execCmd(25, "RCPT TO:<%s>", to); err != nil {
+		if _, _, err := conn.execCmd(25, "RCPT TO:<%s>", to); err != nil {
 			return err
 		}
 	}
 	for _, bcc := range r.Bcc {
-		if _, _, err := c.execCmd(25, "RCPT TO:<%s>", bcc); err != nil {
+		if _, _, err := conn.execCmd(25, "RCPT TO:<%s>", bcc); err != nil {
 			return err
 		}
 	}
 
-	if _, _, err := c.execCmd(354, "DATA"); err != nil {
+	if _, _, err := conn.execCmd(354, "DATA"); err != nil {
 		return err
 	}
 
-	w := c.textConn.DotWriter()
+	w := conn.textConn.DotWriter()
 	if err := r.Write(w); err != nil {
 		return err
 	}
 	if err := w.Close(); err != nil {
 		return err
 	}
-	if _, _, err := c.textConn.ReadResponse(250); err != nil {
+	if _, _, err := conn.textConn.ReadResponse(250); err != nil {
 		return err
 	}
 
-	if _, _, err := c.execCmd(221, "QUIT"); err != nil {
+	if _, _, err := conn.execCmd(221, "QUIT"); err != nil {
 		return err
 	}
 	return nil
-}
-
-func (c *Client) execCmd(expectCode int, fmt string, args ...interface{}) (int, string, error) {
-	id, err := c.textConn.Cmd(fmt, args...)
-	if err != nil {
-		return 0, "", err
-	}
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id)
-	return c.textConn.ReadResponse(expectCode)
 }
 
 // Request represents an mail request.
